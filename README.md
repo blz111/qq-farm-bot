@@ -51,12 +51,16 @@ npm install
 ### 获取登录 Code
 
 你需要从小程序中抓取 code。可以通过抓包工具（如 Fiddler、Charles、mitmproxy 等）获取 WebSocket 连接 URL 中的 `code` 参数。
+也可以使用内置扫码登录获取 QQ 经典农场 code（见下文）。
 
 ### 启动挂机
 
 ```bash
 # QQ小程序 (默认)
 node client.js --code <你的登录code>
+
+# 扫码登录 (QQ经典农场)
+node client.js --qr
 
 # 微信小程序
 node client.js --code <你的登录code> --wx

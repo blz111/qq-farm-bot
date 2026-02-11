@@ -11,10 +11,11 @@ const statusData = {
     level: 0,
     gold: 0,
     exp: 0,
+    farmLines: [],
 };
 
 // ============ 状态栏高度 ============
-const STATUS_LINES = 2;  // 状态栏占用行数
+const BASE_STATUS_LINES = 2;  // 基础状态栏占用行数
 
 // ============ ANSI 转义码 ============
 const ESC = '\x1b';
@@ -35,6 +36,7 @@ const MAGENTA = `${ESC}[35m`;
 // ============ 状态栏是否启用 ============
 let statusEnabled = false;
 let termRows = 24;
+let lastRenderedLines = BASE_STATUS_LINES;
 
 /**
  * 初始化状态栏
@@ -49,14 +51,12 @@ function initStatusBar() {
     statusEnabled = true;
 
     // 设置滚动区域，留出顶部状态栏空间
-    process.stdout.write(SCROLL_REGION(STATUS_LINES + 1, termRows));
-    // 移动光标到滚动区域
-    process.stdout.write(MOVE_TO(STATUS_LINES + 1, 1));
+    updateScrollRegion(getTotalStatusLines());
 
     // 监听终端大小变化
     process.stdout.on('resize', () => {
         termRows = process.stdout.rows || 24;
-        process.stdout.write(SCROLL_REGION(STATUS_LINES + 1, termRows));
+        updateScrollRegion(getTotalStatusLines());
         renderStatusBar();
     });
 
@@ -74,8 +74,21 @@ function cleanupStatusBar() {
     // 重置滚动区域
     process.stdout.write(RESET_SCROLL);
     // 清除状态栏
-    process.stdout.write(MOVE_TO(1, 1) + CLEAR_LINE);
-    process.stdout.write(MOVE_TO(2, 1) + CLEAR_LINE);
+    for (let i = 1; i <= lastRenderedLines; i++) {
+        process.stdout.write(MOVE_TO(i, 1) + CLEAR_LINE);
+    }
+}
+
+function getTotalStatusLines() {
+    const extraLines = statusData.farmLines ? statusData.farmLines.length : 0;
+    return BASE_STATUS_LINES + extraLines;
+}
+
+function updateScrollRegion(totalLines) {
+    const lines = Math.max(BASE_STATUS_LINES, totalLines);
+    lastRenderedLines = lines;
+    process.stdout.write(SCROLL_REGION(lines + 1, termRows));
+    process.stdout.write(MOVE_TO(lines + 1, 1));
 }
 
 /**
@@ -84,7 +97,7 @@ function cleanupStatusBar() {
 function renderStatusBar() {
     if (!statusEnabled) return;
 
-    const { platform, name, level, gold, exp } = statusData;
+    const { platform, name, level, gold, exp, farmLines } = statusData;
 
     // 构建状态行
     const platformStr = platform === 'wx' ? `${MAGENTA}微信${RESET}` : `${CYAN}QQ${RESET}`;
@@ -113,12 +126,31 @@ function renderStatusBar() {
     const width = process.stdout.columns || 80;
     const line2 = `${DIM}${'─'.repeat(Math.min(width, 80))}${RESET}`;
 
+    const totalLines = getTotalStatusLines();
+    const prevLines = lastRenderedLines;
+    if (totalLines !== prevLines) {
+        updateScrollRegion(totalLines);
+    }
+
+    const linesToClear = Math.max(totalLines, prevLines);
+
     // 保存光标位置
     process.stdout.write(SAVE_CURSOR);
-    // 移动到第一行并清除
-    process.stdout.write(MOVE_TO(1, 1) + CLEAR_LINE + line1);
-    // 移动到第二行并清除
-    process.stdout.write(MOVE_TO(2, 1) + CLEAR_LINE + line2);
+    // 清除所有状态栏行
+    for (let i = 1; i <= linesToClear; i++) {
+        process.stdout.write(MOVE_TO(i, 1) + CLEAR_LINE);
+    }
+    // 第一行
+    process.stdout.write(MOVE_TO(1, 1) + line1);
+    // 第二行
+    process.stdout.write(MOVE_TO(2, 1) + line2);
+    // 农场状态行
+    if (farmLines && farmLines.length > 0) {
+        for (let i = 0; i < farmLines.length; i++) {
+            const line = farmLines[i];
+            process.stdout.write(MOVE_TO(3 + i, 1) + line);
+        }
+    }
     // 恢复光标位置
     process.stdout.write(RESTORE_CURSOR);
 }

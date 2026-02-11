@@ -30,11 +30,13 @@ QQ经典农场 挂机脚本
 
 用法:
   node client.js --code <登录code> [--wx] [--interval <秒>] [--friend-interval <秒>]
+  node client.js --qr [--interval <秒>] [--friend-interval <秒>]
   node client.js --verify
   node client.js --decode <数据> [--hex] [--gate] [--type <消息类型>]
 
 参数:
   --code              小程序 login() 返回的临时凭证 (必需)
+  --qr                扫码登录获取QQ经典农场 code
   --wx                使用微信登录 (默认为QQ小程序)
   --interval          自己农场巡查完成后等待秒数, 默认10秒, 最低10秒
   --friend-interval   好友巡查完成后等待秒数, 默认1秒, 最低1秒
@@ -60,9 +62,13 @@ QQ经典农场 挂机脚本
 // ============ 参数解析 ============
 function parseArgs(args) {
     let code = '';
+    let useQr = false;
     for (let i = 0; i < args.length; i++) {
         if (args[i] === '--code' && args[i + 1]) {
             code = args[++i];
+        }
+        if (args[i] === '--qr') {
+            useQr = true;
         }
         if (args[i] === '--wx') {
             CONFIG.platform = 'wx';
@@ -76,7 +82,7 @@ function parseArgs(args) {
             CONFIG.friendCheckInterval = Math.max(sec, 1) * 1000;  // 最低1秒
         }
     }
-    return code;
+    return { code, useQr };
 }
 
 // ============ 主函数 ============
@@ -99,7 +105,20 @@ async function main() {
     }
 
     // 正常挂机模式
-    const code = parseArgs(args);
+    const { code: argCode, useQr } = parseArgs(args);
+    let code = argCode;
+    if (useQr) {
+        if (CONFIG.platform === 'wx') {
+            CONFIG.platform = 'qq';
+        }
+        const { getFarmCodeByQr } = require('./src/qrlogin');
+        const result = await getFarmCodeByQr();
+        if (!result || !result.code) {
+            console.error('扫码登录失败: 未获取到code');
+            process.exit(1);
+        }
+        code = result.code;
+    }
     if (!code) {
         showHelp();
         process.exit(1);

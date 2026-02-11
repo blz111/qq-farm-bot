@@ -8,6 +8,7 @@ const { types } = require('./proto');
 const { sendMsgAsync, getUserState, networkEvents } = require('./network');
 const { toLong, toNum, getServerTimeSec, toTimeSec, log, logWarn, sleep } = require('./utils');
 const { getPlantNameBySeedId, getPlantName, getPlantExp, formatGrowTime, getPlantGrowTime } = require('./gameConfig');
+const { updateStatus } = require('./status');
 
 // ============ 内部状态 ============
 let isCheckingFarm = false;
@@ -346,10 +347,12 @@ function analyzeLands(lands) {
         harvestable: [], needWater: [], needWeed: [], needBug: [],
         growing: [], empty: [], dead: [],
         harvestableInfo: [],  // 收获植物的详细信息 { id, name, exp }
+        farmLines: [],  // 状态栏显示用的行
     };
 
     const nowSec = getServerTimeSec();
     const debug = false;
+    const landSummaries = [];
 
     if (debug) {
         console.log('');
@@ -363,6 +366,7 @@ function analyzeLands(lands) {
         const id = toNum(land.id);
         if (!land.unlocked) {
             if (debug) console.log(`  土地#${id}: 未解锁`);
+            landSummaries.push(`#${id} 锁`);
             continue;
         }
 
@@ -370,10 +374,16 @@ function analyzeLands(lands) {
         if (!plant || !plant.phases || plant.phases.length === 0) {
             result.empty.push(id);
             if (debug) console.log(`  土地#${id}: 空地`);
+            landSummaries.push(`#${id} 空`);
             continue;
         }
 
-        const plantName = plant.name || '未知作物';
+        const plantId = toNum(plant.id);
+        let plantName = getPlantName(plantId);
+        if (plantName === `植物${plantId}` && plant.name) {
+            plantName = plant.name;
+        }
+        if (plantName.length > 4) plantName = plantName.slice(0, 4);
         const landLabel = `土地#${id}(${plantName})`;
 
         if (debug) {
@@ -383,20 +393,23 @@ function analyzeLands(lands) {
         const currentPhase = getCurrentPhase(plant.phases, debug, landLabel);
         if (!currentPhase) {
             result.empty.push(id);
+            landSummaries.push(`#${id} 空`);
             continue;
         }
         const phaseVal = currentPhase.phase;
+        const totalGrowTime = getPlantGrowTime(plantId);
+        const totalGrowStr = totalGrowTime > 0 ? formatGrowTime(totalGrowTime) : '未知';
 
         if (phaseVal === PlantPhase.DEAD) {
             result.dead.push(id);
             if (debug) console.log(`    → 结果: 枯死`);
+            landSummaries.push(`#${id} ${plantName} 枯`);
             continue;
         }
 
         if (phaseVal === PlantPhase.MATURE) {
             result.harvestable.push(id);
             // 收集植物信息用于日志
-            const plantId = toNum(plant.id);
             const plantNameFromConfig = getPlantName(plantId);
             const plantExp = getPlantExp(plantId);
             result.harvestableInfo.push({
@@ -406,6 +419,7 @@ function analyzeLands(lands) {
                 exp: plantExp,
             });
             if (debug) console.log(`    → 结果: 可收获 (${plantNameFromConfig} +${plantExp}经验)`);
+            landSummaries.push(`#${id} ${plantName} ${formatGrowTime(0)}/${totalGrowStr}`);
             continue;
         }
 
@@ -436,6 +450,9 @@ function analyzeLands(lands) {
             const needStr = landNeeds.length > 0 ? ` 需要: ${landNeeds.join(',')}` : '';
             console.log(`    → 结果: 生长中(${PHASE_NAMES[phaseVal] || phaseVal})${needStr}`);
         }
+        const remainingSec = getRemainingToMatureSec(plant.phases, nowSec, totalGrowTime);
+        const remainStr = formatGrowTime(remainingSec);
+        landSummaries.push(`#${id} ${plantName} ${remainStr}/${totalGrowStr}`);
     }
 
     if (debug) {
@@ -452,7 +469,40 @@ function analyzeLands(lands) {
         console.log('');
     }
 
+    result.farmLines = buildFarmStatusLines(landSummaries);
     return result;
+}
+
+function getRemainingToMatureSec(phases, nowSec, totalGrowTime) {
+    if (!phases || phases.length === 0) return 0;
+    let matureBegin = 0;
+    let earliestBegin = 0;
+    for (const p of phases) {
+        const begin = toTimeSec(p.begin_time);
+        if (begin > 0 && (earliestBegin === 0 || begin < earliestBegin)) {
+            earliestBegin = begin;
+        }
+        if (p.phase === PlantPhase.MATURE && begin > 0 && (matureBegin === 0 || begin < matureBegin)) {
+            matureBegin = begin;
+        }
+    }
+    if (matureBegin > 0) {
+        return Math.max(0, matureBegin - nowSec);
+    }
+    if (totalGrowTime > 0 && earliestBegin > 0) {
+        const elapsed = Math.max(0, nowSec - earliestBegin);
+        return Math.max(0, totalGrowTime - elapsed);
+    }
+    return 0;
+}
+
+function buildFarmStatusLines(landSummaries) {
+    const lines = [];
+    const perLine = 3;
+    for (let i = 0; i < landSummaries.length; i += perLine) {
+        lines.push(landSummaries.slice(i, i + perLine).join(' | '));
+    }
+    return lines;
 }
 
 // ============ 巡田主循环 ============
@@ -471,6 +521,7 @@ async function checkFarm() {
 
         const lands = landsReply.lands;
         const status = analyzeLands(lands);
+        updateStatus({ farmLines: status.farmLines });
         isFirstFarmCheck = false;
 
         // 构建状态摘要
