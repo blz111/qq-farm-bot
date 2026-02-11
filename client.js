@@ -38,8 +38,8 @@ QQ经典农场 挂机脚本
   --code              小程序 login() 返回的临时凭证 (必需)
   --qr                扫码登录获取QQ经典农场 code
   --wx                使用微信登录 (默认为QQ小程序)
-  --interval          自己农场巡查完成后等待秒数, 默认10秒, 最低10秒
-  --friend-interval   好友巡查完成后等待秒数, 默认1秒, 最低1秒
+  --interval          自己农场巡查完成后等待秒数, 默认1秒, 最低1秒
+  --friend-interval   好友巡查完成后等待秒数, 默认10秒, 最低1秒
   --verify            验证proto定义
   --decode            解码PB数据 (运行 --decode 无参数查看详细帮助)
 
@@ -140,9 +140,9 @@ async function main() {
         startFriendCheckLoop();
         initTaskSystem();
         
-        // 启动时立即检查一次背包（调试用 目前不可用）
-        // setTimeout(() => debugSellFruits(), 5000);
-        // startSellLoop(60000);  // 每分钟自动出售仓库果实
+        // 启动时立即检查一次背包
+        setTimeout(() => debugSellFruits(), 5000);
+        startSellLoop(60000);  // 每分钟自动出售仓库果实
     });
 
     // 退出处理

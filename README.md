@@ -13,7 +13,7 @@
 - **自动除草** — 检测并清除杂草
 - **自动除虫** — 检测并消灭害虫
 - **自动浇水** — 检测缺水作物并浇水
-- ~~**自动出售** — 每分钟自动出售仓库中的果实（暂时不行）~~
+- **自动出售** — 每分钟自动出售仓库中的果实（基于种子数据识别）
 
 ### 好友农场
 - **好友巡查** — 自动巡查好友农场
@@ -89,7 +89,7 @@ node client.js --code <code> --interval 5 --friend-interval 2
 | `--qr` | 扫码登录获取 QQ 农场 code | — |
 | `--wx` | 使用微信登录 | QQ 小程序 |
 | `--interval` | 自己农场巡查间隔（秒） | 1 |
-| `--friend-interval` | 好友巡查间隔（秒） | 1 |
+| `--friend-interval` | 好友巡查间隔（秒） | 10 |
 | `--verify` | 验证 proto 定义是否正确 | — |
 | `--decode` | 进入 PB 数据解码模式 | — |
 
@@ -167,7 +167,8 @@ node tools/analyze-exp-24h-lv24.js
 │   ├── RoleLevel.json     # 等级经验表
 │   └── Plant.json         # 植物数据（名称/生长时间/经验等）
 ├── tools/                 # 辅助工具
-│   └── analyze-exp-*.js   # 经验效率分析脚本
+│   ├── analyze-exp-*.js   # 经验效率分析脚本
+│   └── seed-shop-merged-export.json # 种子与果实映射数据
 ├── start-qq.cmd           # Windows 启动脚本（手动输入 code）
 ├── start-qq-qr.ps1         # Windows 启动脚本（扫码登录）
 └── package.json
@@ -211,7 +212,7 @@ const CONFIG = {
     platform: 'qq',              // 平台: qq 或 wx
     heartbeatInterval: 25000,    // 心跳间隔 25秒
     farmCheckInterval: 1000,     // 农场巡查间隔 1秒
-    friendCheckInterval: 1000,   // 好友巡查间隔 1秒
+    friendCheckInterval: 10000,  // 好友巡查间隔 10秒
 };
 ```
 

@@ -15,6 +15,8 @@ let isFirstFriendCheck = true;
 let friendCheckTimer = null;
 let friendLoopRunning = false;
 let lastResetDate = '';  // 上次重置日期 (YYYY-MM-DD)
+let helpExpBlockedUntil = 0;
+const HELP_EXP_BLOCK_MS = 60 * 60 * 1000;
 
 // 操作限制状态 (从服务器响应中更新)
 // 操作类型ID (根据游戏代码):
@@ -124,6 +126,16 @@ function canGetExp(opId) {
     if (!limit) return false;  // 没有限制信息，保守起见不帮助（等待农场检查获取限制）
     if (limit.dayExpTimesLimit <= 0) return true;  // 没有经验上限
     return limit.dayExpTimes < limit.dayExpTimesLimit;
+}
+
+function isHelpExpBlocked() {
+    if (!helpExpBlockedUntil) return false;
+    return Date.now() < helpExpBlockedUntil;
+}
+
+function blockHelpExp() {
+    helpExpBlockedUntil = Date.now() + HELP_EXP_BLOCK_MS;
+    log('好友', '帮忙经验已达上限，1小时内不再帮忙');
 }
 
 /**
@@ -361,7 +373,14 @@ async function visitFriend(friend, totalActions, myGid) {
     const actions = [];
 
     // 帮助操作: 只在有经验时执行 (如果启用了 HELP_ONLY_WITH_EXP)
-    if (status.needWeed.length > 0) {
+    const helpBlocked = isHelpExpBlocked();
+    let helpOps = 0;
+    let expBeforeHelp = null;
+    if (!helpBlocked && (status.needWeed.length > 0 || status.needBug.length > 0 || status.needWater.length > 0)) {
+        expBeforeHelp = toNum(getUserState().exp);
+    }
+
+    if (!helpBlocked && status.needWeed.length > 0) {
         const shouldHelp = !HELP_ONLY_WITH_EXP || canGetExp(10005);  // 10005=除草
         if (shouldHelp) {
             let ok = 0;
@@ -369,11 +388,11 @@ async function visitFriend(friend, totalActions, myGid) {
                 try { await helpWeed(gid, [landId]); ok++; } catch (e) { /* ignore */ }
                 await sleep(100);
             }
-            if (ok > 0) { actions.push(`草${ok}`); totalActions.weed += ok; }
+            if (ok > 0) { actions.push(`草${ok}`); totalActions.weed += ok; helpOps += ok; }
         }
     }
 
-    if (status.needBug.length > 0) {
+    if (!helpBlocked && status.needBug.length > 0) {
         const shouldHelp = !HELP_ONLY_WITH_EXP || canGetExp(10006);  // 10006=除虫
         if (shouldHelp) {
             let ok = 0;
@@ -381,11 +400,11 @@ async function visitFriend(friend, totalActions, myGid) {
                 try { await helpInsecticide(gid, [landId]); ok++; } catch (e) { /* ignore */ }
                 await sleep(100);
             }
-            if (ok > 0) { actions.push(`虫${ok}`); totalActions.bug += ok; }
+            if (ok > 0) { actions.push(`虫${ok}`); totalActions.bug += ok; helpOps += ok; }
         }
     }
 
-    if (status.needWater.length > 0) {
+    if (!helpBlocked && status.needWater.length > 0) {
         const shouldHelp = !HELP_ONLY_WITH_EXP || canGetExp(10007);  // 10007=浇水
         if (shouldHelp) {
             let ok = 0;
@@ -393,7 +412,15 @@ async function visitFriend(friend, totalActions, myGid) {
                 try { await helpWater(gid, [landId]); ok++; } catch (e) { /* ignore */ }
                 await sleep(100);
             }
-            if (ok > 0) { actions.push(`水${ok}`); totalActions.water += ok; }
+            if (ok > 0) { actions.push(`水${ok}`); totalActions.water += ok; helpOps += ok; }
+        }
+    }
+
+    if (!helpBlocked && helpOps > 0 && expBeforeHelp !== null) {
+        await sleep(200);
+        const expAfterHelp = toNum(getUserState().exp);
+        if (expAfterHelp <= expBeforeHelp) {
+            blockHelpExp();
         }
     }
 

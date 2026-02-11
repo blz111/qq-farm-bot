@@ -20,7 +20,8 @@ message SellRequest {
 }
 
 message SellReply {
-    int64 gold = 1;  // 获得的金币
+    repeated corepb.Item sell_items = 1;  // 出售的物品
+    repeated corepb.Item get_items = 2;   // 获得的物品（id=1001为金币, id=1002为点券）
 }
 
 // ============ 使用物品 ============

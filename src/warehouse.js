@@ -5,18 +5,44 @@
 
 const { types } = require('./proto');
 const { sendMsgAsync } = require('./network');
-const { toLong, toNum, log, logWarn, sleep } = require('./utils');
+const { toLong, toNum, log, logWarn } = require('./utils');
 const { getFruitName } = require('./gameConfig');
+const seedShopData = require('../tools/seed-shop-merged-export.json');
 
-// 果实 ID 范围：Plant.json 中 fruit.id 为 4xxxx；部分接口可能用 3xxx，两段都视为果实
-const FRUIT_ID_MIN = 3001;
-const FRUIT_ID_MAX = 49999;
-
-// 单次 Sell 请求最多条数，过多可能触发 1000020 参数错误
-const SELL_BATCH_SIZE = 15;
+// 游戏内金币和点券的物品 ID (GlobalData.GodItemId / DiamondItemId)
+const GOLD_ITEM_ID = 1001;
+const FRUIT_ID_SET = new Set(
+    ((seedShopData && seedShopData.rows) || [])
+        .map(row => Number(row.fruitId))
+        .filter(Number.isFinite)
+);
 
 let sellTimer = null;
 let sellInterval = 60000;
+
+function isFruitIdBySeedData(id) {
+    return FRUIT_ID_SET.has(toNum(id));
+}
+
+/**
+ * 从 SellReply 中提取获得的金币数量
+ * 新版 SellReply 返回 get_items (repeated Item)，其中 id=1001 为金币
+ */
+function extractGold(sellReply) {
+    if (sellReply.get_items && sellReply.get_items.length > 0) {
+        for (const item of sellReply.get_items) {
+            const id = toNum(item.id);
+            if (id === GOLD_ITEM_ID) {
+                return toNum(item.count);
+            }
+        }
+        return 0;
+    }
+    if (sellReply.gold !== undefined && sellReply.gold !== null) {
+        return toNum(sellReply.gold);
+    }
+    return 0;
+}
 
 async function getBag() {
     const body = types.BagRequest.encode(types.BagRequest.create({})).finish();
@@ -55,29 +81,26 @@ async function sellAllFruits() {
         const bagReply = await getBag();
         const items = getBagItems(bagReply);
 
-        const toSell = [];
-        const names = [];
-        for (const item of items) {
-            const id = toNum(item.id);
-            const count = toNum(item.count);
-            if (id >= FRUIT_ID_MIN && id <= FRUIT_ID_MAX && count > 0) {
-                toSell.push(item);
-                names.push(`${getFruitName(id)}x${count}`);
-            }
+    const toSell = [];
+    const names = [];
+    for (const item of items) {
+        const id = toNum(item.id);
+        const count = toNum(item.count);
+        const uid = item.uid ? toNum(item.uid) : 0;
+        if (isFruitIdBySeedData(id) && count > 0) {
+            if (uid === 0) continue;  // 跳过无效格子
+            toSell.push(item);
+            names.push(`${getFruitName(id)}x${count}`);
         }
+    }
 
-        if (toSell.length === 0) return;
+    if (toSell.length === 0) return;
 
-        let totalGold = 0;
-        for (let i = 0; i < toSell.length; i += SELL_BATCH_SIZE) {
-            const batch = toSell.slice(i, i + SELL_BATCH_SIZE);
-            const reply = await sellItems(batch);
-            totalGold += toNum(reply.gold || 0);
-            if (i + SELL_BATCH_SIZE < toSell.length) await sleep(300);
-        }
-        log('仓库', `出售 ${names.join(', ')}，获得 ${totalGold} 金币`);
-    } catch (e) {
-        logWarn('仓库', `出售失败: ${e.message}`);
+    const reply = await sellItems(toSell);
+    const totalGold = extractGold(reply);
+    log('仓库', `出售 ${names.join(', ')}，获得 ${totalGold} 金币`);
+} catch (e) {
+    logWarn('仓库', `出售失败: ${e.message}`);
     }
 }
 
@@ -88,40 +111,33 @@ async function debugSellFruits() {
         const items = getBagItems(bagReply);
         log('仓库', `背包共 ${items.length} 种物品`);
 
-        for (const item of items) {
-            const id = toNum(item.id);
-            const count = toNum(item.count);
-            const isFruit = id >= FRUIT_ID_MIN && id <= FRUIT_ID_MAX;
-            if (isFruit) {
-                const name = getFruitName(id);
-                log('仓库', `  [果实] ${name}(${id}) x${count}`);
-            }
+    for (const item of items) {
+        const id = toNum(item.id);
+        const count = toNum(item.count);
+        const isFruit = isFruitIdBySeedData(id);
+        if (isFruit) {
+            const name = getFruitName(id);
+            log('仓库', `  [果实] ${name}(${id}) x${count}`);
+        }
         }
 
         const toSell = [];
-        for (const item of items) {
-            const id = toNum(item.id);
-            const count = toNum(item.count);
-            if (id >= FRUIT_ID_MIN && id <= FRUIT_ID_MAX && count > 0)
-                toSell.push(item);
-        }
+    for (const item of items) {
+        const id = toNum(item.id);
+        const count = toNum(item.count);
+        if (isFruitIdBySeedData(id) && count > 0)
+            toSell.push(item);
+    }
 
         if (toSell.length === 0) {
             log('仓库', '没有果实可出售');
             return;
         }
 
-        log('仓库', `准备出售 ${toSell.length} 种果实，每批 ${SELL_BATCH_SIZE} 条...`);
-        let totalGold = 0;
-        for (let i = 0; i < toSell.length; i += SELL_BATCH_SIZE) {
-            const batch = toSell.slice(i, i + SELL_BATCH_SIZE);
-            const reply = await sellItems(batch);
-            const g = toNum(reply.gold || 0);
-            totalGold += g;
-            log('仓库', `  第 ${Math.floor(i / SELL_BATCH_SIZE) + 1} 批: 获得 ${g} 金币`);
-            if (i + SELL_BATCH_SIZE < toSell.length) await sleep(300);
-        }
-        log('仓库', `出售完成，共获得 ${totalGold} 金币`);
+    log('仓库', `准备出售 ${toSell.length} 种果实...`);
+    const reply = await sellItems(toSell);
+    const totalGold = extractGold(reply);
+    log('仓库', `出售完成，共获得 ${totalGold} 金币`);
     } catch (e) {
         logWarn('仓库', `调试出售失败: ${e.message}`);
         console.error(e);
