@@ -364,9 +364,10 @@ function analyzeLands(lands) {
 
     for (const land of lands) {
         const id = toNum(land.id);
+        const landPrefix = formatLandPrefix(id);
         if (!land.unlocked) {
             if (debug) console.log(`  土地#${id}: 未解锁`);
-            landSummaries.push(`#${id} 锁`);
+            landSummaries.push(`${landPrefix}锁`);
             continue;
         }
 
@@ -374,7 +375,7 @@ function analyzeLands(lands) {
         if (!plant || !plant.phases || plant.phases.length === 0) {
             result.empty.push(id);
             if (debug) console.log(`  土地#${id}: 空地`);
-            landSummaries.push(`#${id} 空`);
+            landSummaries.push(`${landPrefix}空`);
             continue;
         }
 
@@ -393,7 +394,7 @@ function analyzeLands(lands) {
         const currentPhase = getCurrentPhase(plant.phases, debug, landLabel);
         if (!currentPhase) {
             result.empty.push(id);
-            landSummaries.push(`#${id} 空`);
+            landSummaries.push(`${landPrefix}空`);
             continue;
         }
         const phaseVal = currentPhase.phase;
@@ -403,7 +404,7 @@ function analyzeLands(lands) {
         if (phaseVal === PlantPhase.DEAD) {
             result.dead.push(id);
             if (debug) console.log(`    → 结果: 枯死`);
-            landSummaries.push(`#${id} ${plantName} 枯`);
+            landSummaries.push(`${landPrefix}${plantName} 枯`);
             continue;
         }
 
@@ -419,7 +420,7 @@ function analyzeLands(lands) {
                 exp: plantExp,
             });
             if (debug) console.log(`    → 结果: 可收获 (${plantNameFromConfig} +${plantExp}经验)`);
-            landSummaries.push(`#${id} ${plantName} ${formatGrowTime(0)}/${totalGrowStr}`);
+            landSummaries.push(`${landPrefix}${plantName} ${formatGrowTime(0)}/${totalGrowStr}`);
             continue;
         }
 
@@ -452,7 +453,7 @@ function analyzeLands(lands) {
         }
         const remainingSec = getRemainingToMatureSec(plant.phases, nowSec, totalGrowTime);
         const remainStr = formatGrowTime(remainingSec);
-        landSummaries.push(`#${id} ${plantName} ${remainStr}/${totalGrowStr}`);
+        landSummaries.push(`${landPrefix}${plantName} ${remainStr}/${totalGrowStr}`);
     }
 
     if (debug) {
@@ -498,11 +499,15 @@ function getRemainingToMatureSec(phases, nowSec, totalGrowTime) {
 
 function buildFarmStatusLines(landSummaries) {
     const lines = [];
-    const perLine = 3;
+    const perLine = 4;
     for (let i = 0; i < landSummaries.length; i += perLine) {
         lines.push(landSummaries.slice(i, i + perLine).join(' | '));
     }
     return lines;
+}
+
+function formatLandPrefix(id) {
+    return id < 10 ? `#${id}  ` : `#${id} `;
 }
 
 // ============ 巡田主循环 ============

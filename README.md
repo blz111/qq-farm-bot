@@ -1,7 +1,7 @@
 # QQ经典农场 挂机脚本
 
 基于 Node.js 的 QQ/微信 经典农场小程序自动化挂机脚本。通过分析小程序 WebSocket 通信协议（Protocol Buffers），实现全自动农场管理。
-本脚本基于ai制作，必然有一定的bug，遇到了建议自己克服一下，后续不一定会更新了
+本项目为社区版本的 fork，功能与文档已根据当前实现做了更新。
 
 ## 功能特性
 
@@ -18,15 +18,17 @@
 ### 好友农场
 - **好友巡查** — 自动巡查好友农场
 - **帮忙操作** — 帮好友浇水/除草/除虫
-- **自动偷菜** — 偷取好友成熟作物
+- **自动偷菜** — 偷取好友成熟作物（白萝卜跳过并记录日志）
 
 ### 系统功能
 - **自动领取任务** — 自动领取完成的任务奖励，支持分享翻倍/三倍奖励
 - **自动同意好友** — 微信同玩好友申请自动同意（支持推送实时响应）
 - **邀请码处理** — 启动时自动处理 share.txt 中的邀请链接（微信环境，share.txt有示例，是小程序的path）
 - **状态栏显示** — 终端顶部固定显示平台/昵称/等级/经验/金币
+- **农场状态栏** — 顶部状态栏显示每块地的作物与成熟时间
 - **经验进度** — 显示当前等级经验进度
 - **心跳保活** — 自动维持 WebSocket 连接
+- **扫码登录** — 扫码获取 QQ 经典农场 code（终端展示二维码）
 
 ### 开发工具
 - **PB 解码工具** — 内置 Protobuf 数据解码器，方便调试分析
@@ -35,7 +37,7 @@
 ## 安装
 
 ```bash
-git clone https://github.com/linguo2625469/qq-farm-bot.git
+git clone https://github.com/blz111/qq-farm-bot.git
 cd qq-farm-bot
 npm install
 ```
@@ -45,6 +47,8 @@ npm install
 - [ws](https://www.npmjs.com/package/ws) — WebSocket 客户端
 - [protobufjs](https://www.npmjs.com/package/protobufjs) — Protocol Buffers 编解码
 - [long](https://www.npmjs.com/package/long) — 64 位整数支持
+- [axios](https://www.npmjs.com/package/axios) — HTTP 请求
+- [qrcode-terminal](https://www.npmjs.com/package/qrcode-terminal) — 终端二维码输出
 
 ## 使用
 
@@ -82,11 +86,18 @@ node client.js --code <code> --interval 5 --friend-interval 2
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--code` | 小程序登录凭证（**必需**） | — |
+| `--qr` | 扫码登录获取 QQ 农场 code | — |
 | `--wx` | 使用微信登录 | QQ 小程序 |
-| `--interval` | 自己农场巡查间隔（秒） | 2 |
+| `--interval` | 自己农场巡查间隔（秒） | 1 |
 | `--friend-interval` | 好友巡查间隔（秒） | 1 |
 | `--verify` | 验证 proto 定义是否正确 | — |
 | `--decode` | 进入 PB 数据解码模式 | — |
+
+### Windows 一键启动（QQ小程序）
+
+项目根目录提供两个启动脚本：
+- `start-qq.cmd`：双击后输入 QQ 登录 code
+- `start-qq-qr.ps1`：PowerShell 启动扫码登录
 
 ### 邀请码功能（微信环境）
 
@@ -139,6 +150,7 @@ node tools/analyze-exp-24h-lv24.js
 │   ├── warehouse.js       # 仓库系统: 自动出售果实
 │   ├── invite.js          # 邀请码处理: 自动申请好友
 │   ├── gameConfig.js      # 游戏配置: 等级经验表/植物数据
+│   ├── qrlogin.js         # 扫码登录: 获取 QQ 农场 code
 │   └── decode.js          # PB 解码/验证工具模式
 ├── proto/                 # Protobuf 消息定义
 │   ├── game.proto         # 网关消息定义 (gatepb)
@@ -156,6 +168,8 @@ node tools/analyze-exp-24h-lv24.js
 │   └── Plant.json         # 植物数据（名称/生长时间/经验等）
 ├── tools/                 # 辅助工具
 │   └── analyze-exp-*.js   # 经验效率分析脚本
+├── start-qq.cmd           # Windows 启动脚本（手动输入 code）
+├── start-qq-qr.ps1         # Windows 启动脚本（扫码登录）
 └── package.json
 ```
 
@@ -196,7 +210,7 @@ const CONFIG = {
     clientVersion: '1.6.0.5_20251224',
     platform: 'qq',              // 平台: qq 或 wx
     heartbeatInterval: 25000,    // 心跳间隔 25秒
-    farmCheckInterval: 2000,     // 农场巡查间隔 2秒
+    farmCheckInterval: 1000,     // 农场巡查间隔 1秒
     friendCheckInterval: 1000,   // 好友巡查间隔 1秒
 };
 ```
@@ -214,6 +228,7 @@ const ENABLE_PUT_BAD_THINGS = false;  // 是否启用放虫放草功能
 2. **请合理设置巡查间隔**，过于频繁可能触发服务器限流
 3. **微信环境**才支持邀请码和好友申请功能
 4. **QQ环境**下服务器不推送土地状态变化，依靠定时巡查
+5. **扫码登录二维码有效期短**，失效后需重新获取
 
 ## 免责声明
 
