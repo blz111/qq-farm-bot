@@ -15,6 +15,8 @@ let isCheckingFarm = false;
 let isFirstFarmCheck = true;
 let farmCheckTimer = null;
 let farmLoopRunning = false;
+let lastFarmSnapshot = null;
+let forceFarmCheck = false;
 
 // ============ 农场 API ============
 
@@ -348,9 +350,13 @@ function analyzeLands(lands) {
         growing: [], empty: [], dead: [],
         harvestableInfo: [],  // 收获植物的详细信息 { id, name, exp }
         farmLines: [],  // 状态栏显示用的行
+        landSnapshots: [],
+        minRemainingSec: null,
+        serverTimeSec: 0,
     };
 
     const nowSec = getServerTimeSec();
+    result.serverTimeSec = nowSec;
     const debug = false;
     const landSummaries = [];
 
@@ -368,6 +374,7 @@ function analyzeLands(lands) {
         if (!land.unlocked) {
             if (debug) console.log(`  土地#${id}: 未解锁`);
             landSummaries.push(`${landPrefix}锁`);
+            result.landSnapshots.push({ id, type: 'lock' });
             continue;
         }
 
@@ -376,6 +383,7 @@ function analyzeLands(lands) {
             result.empty.push(id);
             if (debug) console.log(`  土地#${id}: 空地`);
             landSummaries.push(`${landPrefix}空`);
+            result.landSnapshots.push({ id, type: 'empty' });
             continue;
         }
 
@@ -405,6 +413,7 @@ function analyzeLands(lands) {
             result.dead.push(id);
             if (debug) console.log(`    → 结果: 枯死`);
             landSummaries.push(`${landPrefix}${plantName} 枯`);
+            result.landSnapshots.push({ id, type: 'dead', name: plantName });
             continue;
         }
 
@@ -421,6 +430,7 @@ function analyzeLands(lands) {
             });
             if (debug) console.log(`    → 结果: 可收获 (${plantNameFromConfig} +${plantExp}经验)`);
             landSummaries.push(`${landPrefix}${plantName} ${formatGrowTime(0)}/${totalGrowStr}`);
+            result.landSnapshots.push({ id, type: 'mature', name: plantName, totalGrowTime });
             continue;
         }
 
@@ -451,9 +461,23 @@ function analyzeLands(lands) {
             const needStr = landNeeds.length > 0 ? ` 需要: ${landNeeds.join(',')}` : '';
             console.log(`    → 结果: 生长中(${PHASE_NAMES[phaseVal] || phaseVal})${needStr}`);
         }
-        const remainingSec = getRemainingToMatureSec(plant.phases, nowSec, totalGrowTime);
+        const remainInfo = getRemainingToMatureInfo(plant.phases, nowSec, totalGrowTime);
+        const remainingSec = remainInfo.remainingSec;
+        if (remainInfo.known) {
+            if (result.minRemainingSec === null || remainingSec < result.minRemainingSec) {
+                result.minRemainingSec = remainingSec;
+            }
+        }
         const remainStr = formatGrowTime(remainingSec);
         landSummaries.push(`${landPrefix}${plantName} ${remainStr}/${totalGrowStr}`);
+        result.landSnapshots.push({
+            id,
+            type: 'growing',
+            name: plantName,
+            totalGrowTime,
+            remainingSec,
+            remainingKnown: remainInfo.known,
+        });
     }
 
     if (debug) {
@@ -474,8 +498,8 @@ function analyzeLands(lands) {
     return result;
 }
 
-function getRemainingToMatureSec(phases, nowSec, totalGrowTime) {
-    if (!phases || phases.length === 0) return 0;
+function getRemainingToMatureInfo(phases, nowSec, totalGrowTime) {
+    if (!phases || phases.length === 0) return { remainingSec: 0, known: false };
     let matureBegin = 0;
     let earliestBegin = 0;
     for (const p of phases) {
@@ -488,13 +512,17 @@ function getRemainingToMatureSec(phases, nowSec, totalGrowTime) {
         }
     }
     if (matureBegin > 0) {
-        return Math.max(0, matureBegin - nowSec);
+        return { remainingSec: Math.max(0, matureBegin - nowSec), known: true };
     }
     if (totalGrowTime > 0 && earliestBegin > 0) {
         const elapsed = Math.max(0, nowSec - earliestBegin);
-        return Math.max(0, totalGrowTime - elapsed);
+        return { remainingSec: Math.max(0, totalGrowTime - elapsed), known: true };
     }
-    return 0;
+    return { remainingSec: 0, known: false };
+}
+
+function getRemainingToMatureSec(phases, nowSec, totalGrowTime) {
+    return getRemainingToMatureInfo(phases, nowSec, totalGrowTime).remainingSec;
 }
 
 function buildFarmStatusLines(landSummaries) {
@@ -510,6 +538,83 @@ function formatLandPrefix(id) {
     return id < 10 ? `#${id}  ` : `#${id} `;
 }
 
+function buildFarmSnapshot(status) {
+    return {
+        emptyCount: status.empty.length,
+        deadCount: status.dead.length,
+        harvestableCount: status.harvestable.length,
+        needWaterCount: status.needWater.length,
+        needWeedCount: status.needWeed.length,
+        needBugCount: status.needBug.length,
+        minRemainingSec: status.minRemainingSec,
+        serverTimeSec: status.serverTimeSec,
+        landSnapshots: status.landSnapshots || [],
+        updatedAt: Date.now(),
+    };
+}
+
+function buildFarmLinesFromSnapshot(snapshot) {
+    if (!snapshot || !snapshot.landSnapshots || snapshot.landSnapshots.length === 0) return null;
+    const nowSec = getServerTimeSec();
+    const baseTime = typeof snapshot.serverTimeSec === 'number' ? snapshot.serverTimeSec : nowSec;
+    const elapsed = Math.max(0, nowSec - baseTime);
+    const landSummaries = [];
+
+    for (const item of snapshot.landSnapshots) {
+        const id = item.id;
+        const landPrefix = formatLandPrefix(id);
+        if (item.type === 'lock') {
+            landSummaries.push(`${landPrefix}锁`);
+            continue;
+        }
+        if (item.type === 'empty') {
+            landSummaries.push(`${landPrefix}空`);
+            continue;
+        }
+        if (item.type === 'dead') {
+            landSummaries.push(`${landPrefix}${item.name} 枯`);
+            continue;
+        }
+
+        const totalGrowTime = item.totalGrowTime || 0;
+        const totalGrowStr = totalGrowTime > 0 ? formatGrowTime(totalGrowTime) : '未知';
+
+        if (item.type === 'mature') {
+            landSummaries.push(`${landPrefix}${item.name} ${formatGrowTime(0)}/${totalGrowStr}`);
+            continue;
+        }
+        if (item.type === 'growing') {
+            let remainingSec = item.remainingSec || 0;
+            if (item.remainingKnown) {
+                remainingSec = Math.max(0, remainingSec - elapsed);
+            }
+            const remainStr = formatGrowTime(remainingSec);
+            landSummaries.push(`${landPrefix}${item.name} ${remainStr}/${totalGrowStr}`);
+        }
+    }
+
+    return buildFarmStatusLines(landSummaries);
+}
+
+function shouldCheckFarmNow() {
+    if (isFirstFarmCheck) return true;
+    if (forceFarmCheck) return true;
+    if (!lastFarmSnapshot) return true;
+    if (lastFarmSnapshot.emptyCount > 0) return true;
+    if (lastFarmSnapshot.deadCount > 0) return true;
+    if (lastFarmSnapshot.harvestableCount > 0) return true;
+    if (lastFarmSnapshot.needWaterCount > 0) return true;
+    if (lastFarmSnapshot.needWeedCount > 0) return true;
+    if (lastFarmSnapshot.needBugCount > 0) return true;
+    if (typeof lastFarmSnapshot.minRemainingSec === 'number' && typeof lastFarmSnapshot.serverTimeSec === 'number') {
+        const nowSec = getServerTimeSec();
+        const elapsed = Math.max(0, nowSec - lastFarmSnapshot.serverTimeSec);
+        const remaining = lastFarmSnapshot.minRemainingSec - elapsed;
+        if (remaining <= 2) return true;
+    }
+    return false;
+}
+
 // ============ 巡田主循环 ============
 
 async function checkFarm() {
@@ -518,6 +623,14 @@ async function checkFarm() {
     isCheckingFarm = true;
 
     try {
+        if (!shouldCheckFarmNow()) {
+            const refreshedLines = buildFarmLinesFromSnapshot(lastFarmSnapshot);
+            if (refreshedLines) {
+                updateStatus({ farmLines: refreshedLines });
+            }
+            return;
+        }
+
         const landsReply = await getAllLands();
         if (!landsReply.lands || landsReply.lands.length === 0) {
             log('农场', '没有土地数据');
@@ -526,8 +639,10 @@ async function checkFarm() {
 
         const lands = landsReply.lands;
         const status = analyzeLands(lands);
+        lastFarmSnapshot = buildFarmSnapshot(status);
         updateStatus({ farmLines: status.farmLines });
         isFirstFarmCheck = false;
+        forceFarmCheck = false;
 
         // 构建状态摘要
         const statusParts = [];
@@ -624,7 +739,8 @@ function onLandsChangedPush(lands) {
     if (now - lastPushTime < 500) return;  // 500ms 防抖
     
     lastPushTime = now;
-    log('农场', `收到推送: ${lands.length}块土地变化，检查中...`);
+    forceFarmCheck = true;
+    log('农场', `收到推送: ${lands.length}块土地变化，触发巡田...`);
     
     setTimeout(async () => {
         if (!isCheckingFarm) {
