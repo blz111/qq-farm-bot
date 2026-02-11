@@ -62,6 +62,10 @@ node client.js --code <你的登录code>
 node client.js --code <你的登录code> --wx
 ```
 
+### Windows 一键启动（QQ小程序）
+
+项目根目录提供 `start-qq.cmd`，双击后按提示输入 QQ 登录 code 即可启动。
+
 ### 自定义巡查间隔
 
 ```bash

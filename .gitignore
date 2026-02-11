@@ -4,3 +4,10 @@ node_modules
 .package-lock.json
 game.js
 /game
+helloagents/
+dist/
+build/
+target/
+out/
+.cache/
+.parcel-cache/

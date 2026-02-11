@@ -247,6 +247,7 @@ function analyzeFriendLands(lands, myGid, friendName = '') {
     const result = {
         stealable: [],   // 可偷
         stealableInfo: [],  // 可偷植物信息 { landId, plantId, name }
+        skipWhiteRadish: 0,  // 白萝卜跳过计数
         needWater: [],   // 需要浇水
         needWeed: [],    // 需要除草
         needBug: [],     // 需要除虫
@@ -280,10 +281,17 @@ function analyzeFriendLands(lands, myGid, friendName = '') {
 
         if (phaseVal === PlantPhase.MATURE) {
             if (plant.stealable) {
-                result.stealable.push(id);
                 const plantId = toNum(plant.id);
-                const plantName = getPlantName(plantId) || plant.name || '未知';
-                result.stealableInfo.push({ landId: id, plantId, name: plantName });
+                let plantName = getPlantName(plantId);
+                if (plantName === `植物${plantId}` && plant.name) {
+                    plantName = plant.name;
+                }
+                if (plantName === '白萝卜') {
+                    result.skipWhiteRadish++;
+                } else {
+                    result.stealable.push(id);
+                    result.stealableInfo.push({ landId: id, plantId, name: plantName });
+                }
             } else if (showDebug) {
                 console.log(`  [${friendName}] 土地#${id}: 成熟但stealable=false (可能已被偷过)`);
             }
@@ -409,6 +417,9 @@ async function visitFriend(friend, totalActions, myGid) {
             actions.push(`偷${ok}${plantNames ? '(' + plantNames + ')' : ''}`);
             totalActions.steal += ok;
         }
+    }
+    if (status.skipWhiteRadish > 0) {
+        actions.push(`白萝卜不偷${status.skipWhiteRadish}(${name})`);
     }
 
     // 捣乱操作: 放虫(10004)/放草(10003)
