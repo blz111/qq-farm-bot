@@ -26,10 +26,23 @@ const NO_FERT_PLANTS_PER_2_SEC = 18;
 const NORMAL_FERT_PLANTS_PER_2_SEC = 12;
 const NO_FERT_PLANT_SPEED_PER_SEC = NO_FERT_PLANTS_PER_2_SEC / 2; // 9 块/秒
 const NORMAL_FERT_PLANT_SPEED_PER_SEC = NORMAL_FERT_PLANTS_PER_2_SEC / 2; // 6 块/秒
-const FERT_PERCENT = 0.2;
-const FERT_MIN_REDUCE_SEC = 30;
 
 let seedYieldCache = { lands: 0, rows: [] };
+let seedPhaseReduceMap = new Map(); // seed_id -> 首个阶段秒数
+
+function parseGrowPhases(growPhases) {
+    if (!growPhases || typeof growPhases !== 'string') return [];
+    return growPhases
+        .split(';')
+        .map(x => x.trim())
+        .filter(Boolean)
+        .map(seg => {
+            const parts = seg.split(':');
+            const sec = parts.length >= 2 ? Number(parts[1]) : 0;
+            return Number.isFinite(sec) ? sec : 0;
+        })
+        .filter(sec => sec > 0);
+}
 
 // ============ 等级经验表 ============
 let roleLevelConfig = null;
@@ -71,6 +84,7 @@ function loadConfigs() {
             plantMap.clear();
             seedToPlant.clear();
             fruitToPlant.clear();
+            seedPhaseReduceMap = new Map();
             for (const plant of plantConfig) {
                 plantMap.set(plant.id, plant);
                 if (plant.seed_id) {
@@ -78,6 +92,12 @@ function loadConfigs() {
                 }
                 if (plant.fruit && plant.fruit.id) {
                     fruitToPlant.set(plant.fruit.id, plant);
+                }
+                if (plant.seed_id && plant.grow_phases) {
+                    const phases = parseGrowPhases(plant.grow_phases);
+                    if (phases.length > 0 && !seedPhaseReduceMap.has(plant.seed_id)) {
+                        seedPhaseReduceMap.set(plant.seed_id, phases[0]);
+                    }
                 }
             }
             console.log(`[配置] 已加载植物配置 (${plantConfig.length} 种)`);
@@ -230,8 +250,9 @@ function toNumLocal(val, fallback = 0) {
     return Number.isFinite(n) ? n : fallback;
 }
 
-function calcEffectiveGrowTime(growSec) {
-    const reduce = Math.max(growSec * FERT_PERCENT, FERT_MIN_REDUCE_SEC);
+function calcEffectiveGrowTime(growSec, seedId) {
+    const reduce = seedPhaseReduceMap.get(seedId) || 0;
+    if (!reduce) return growSec;
     return Math.max(1, growSec - reduce);
 }
 
@@ -284,7 +305,7 @@ function buildSeedYieldRows(lands) {
         if (!seed.seedId || seed.growTimeSec <= 0) continue;
 
         const expPerCycle = seed.expHarvest; // 铲地经验不计入
-        const growTimeNormalFert = calcEffectiveGrowTime(seed.growTimeSec);
+        const growTimeNormalFert = calcEffectiveGrowTime(seed.growTimeSec, seed.seedId);
 
         const cycleSecNoFert = seed.growTimeSec + plantSecondsNoFert;
         const cycleSecNormalFert = growTimeNormalFert + plantSecondsNormalFert;
@@ -326,7 +347,7 @@ function getBestSeedsForLevel(level, lands, seedIdSet) {
     const lv = Math.max(1, Math.floor(toNumLocal(level, 1)));
     const landCount = Math.max(1, Math.floor(toNumLocal(lands, 1)));
     const rows = buildSeedYieldRows(landCount);
-    const available = rows.filter(r => r.requiredLevel <= lv && r.unlocked !== false);
+    const available = rows.filter(r => r.requiredLevel <= lv);
     const filtered = seedIdSet ? available.filter(r => seedIdSet.has(r.seedId)) : available;
 
     if (filtered.length === 0) return null;

@@ -2,22 +2,27 @@
  * 基于 tools/seed-shop-merged-export.json 计算经验收益率
  *
  * 规则：
- * 1) 每次收获经验 = exp，铲地固定 +1 经验 => 单轮经验 = exp + 1
+ * 1) 每次收获经验 = exp（新版已去除铲地+1经验）
  * 2) 种植速度：
  *    - 不施肥：2 秒种 18 块地 => 9 块/秒
  *    - 普通肥：2 秒种 12 块地 => 6 块/秒
- * 3) 普通肥：减少 20% 生长时间；若 20% < 30 秒，则固定减少 30 秒
+ * 3) 普通肥：直接减少一个生长阶段（按 Plant.json 的 grow_phases 取首个非0阶段时长）
  *
  * 用法：
  *   node tools/calc-exp-yield.js
  *   node tools/calc-exp-yield.js --lands 18 --level 27
  *   node tools/calc-exp-yield.js --input tools/seed-shop-merged-export.json
+ *
+ * 运行时调用：
+ *   const { getPlantingRecommendation } = require('../tools/calc-exp-yield');
+ *   const rec = getPlantingRecommendation(27, 18);
  */
 
 const fs = require('fs');
 const path = require('path');
 
 const DEFAULT_INPUT = path.join(__dirname, 'seed-shop-merged-export.json');
+const PLANT_CONFIG_PATH = path.join(__dirname, '..', 'gameConfig', 'Plant.json');
 const DEFAULT_OUT_JSON = path.join(__dirname, 'exp-yield-result.json');
 const DEFAULT_OUT_CSV = path.join(__dirname, 'exp-yield-result.csv');
 const DEFAULT_OUT_TXT = path.join(__dirname, 'exp-yield-summary.txt');
@@ -26,8 +31,6 @@ const NO_FERT_PLANTS_PER_2_SEC = 18;
 const NORMAL_FERT_PLANTS_PER_2_SEC = 12;
 const NO_FERT_PLANT_SPEED_PER_SEC = NO_FERT_PLANTS_PER_2_SEC / 2; // 9 块/秒
 const NORMAL_FERT_PLANT_SPEED_PER_SEC = NORMAL_FERT_PLANTS_PER_2_SEC / 2; // 6 块/秒
-const FERT_PERCENT = 0.2;
-const FERT_MIN_REDUCE_SEC = 30;
 
 function toNum(v, fallback = 0) {
     const n = Number(v);
@@ -84,8 +87,40 @@ function readSeeds(inputPath) {
     throw new Error('无法识别输入数据格式，需要数组或 rows/seeds 字段');
 }
 
-function calcEffectiveGrowTime(growSec) {
-    const reduce = Math.max(growSec * FERT_PERCENT, FERT_MIN_REDUCE_SEC);
+function parseGrowPhases(growPhases) {
+    if (!growPhases || typeof growPhases !== 'string') return [];
+    return growPhases
+        .split(';')
+        .map(x => x.trim())
+        .filter(Boolean)
+        .map(seg => {
+            const parts = seg.split(':');
+            return parts.length >= 2 ? toNum(parts[1], 0) : 0;
+        })
+        .filter(sec => sec > 0);
+}
+
+function loadSeedPhaseReduceMap() {
+    const text = fs.readFileSync(PLANT_CONFIG_PATH, 'utf8');
+    const rows = JSON.parse(text);
+    if (!Array.isArray(rows)) {
+        throw new Error(`Plant 配置格式异常: ${PLANT_CONFIG_PATH}`);
+    }
+
+    const map = new Map();
+    for (const p of rows) {
+        const seedId = toNum(p.seed_id, 0);
+        if (seedId <= 0 || map.has(seedId)) continue;
+        const phases = parseGrowPhases(p.grow_phases);
+        if (phases.length === 0) continue;
+        map.set(seedId, phases[0]); // 普通肥减少一个阶段：以首个阶段时长为准
+    }
+    return map;
+}
+
+function calcEffectiveGrowTime(growSec, seedId, seedPhaseReduceMap) {
+    const reduce = toNum(seedPhaseReduceMap.get(seedId), 0);
+    if (reduce <= 0) return growSec;
     return Math.max(1, growSec - reduce);
 }
 
@@ -108,11 +143,12 @@ function csvCell(v) {
     return s;
 }
 
-function buildRows(rawSeeds, lands) {
+function buildRows(rawSeeds, lands, seedPhaseReduceMap) {
     const plantSecondsNoFert = lands / NO_FERT_PLANT_SPEED_PER_SEC;
     const plantSecondsNormalFert = lands / NORMAL_FERT_PLANT_SPEED_PER_SEC;
     const rows = [];
     let skipped = 0;
+    let missingPhaseReduceCount = 0;
 
     for (const s of rawSeeds) {
         const seedId = toNum(s.seedId || s.seed_id);
@@ -127,8 +163,10 @@ function buildRows(rawSeeds, lands) {
             continue;
         }
 
-        const expPerCycle = expHarvest; // 铲地经验有上限，默认不计入
-        const growTimeNormalFert = calcEffectiveGrowTime(growTimeSec);
+        const expPerCycle = expHarvest;
+        const reduceSec = toNum(seedPhaseReduceMap.get(seedId), 0);
+        if (reduceSec <= 0) missingPhaseReduceCount++;
+        const growTimeNormalFert = calcEffectiveGrowTime(growTimeSec, seedId, seedPhaseReduceMap);
 
         // 整个农场一轮 = 生长时间 + 本轮全部地块种植耗时
         const cycleSecNoFert = growTimeSec + plantSecondsNoFert;
@@ -153,6 +191,7 @@ function buildRows(rawSeeds, lands) {
             expPerCycle,
             growTimeSec,
             growTimeStr: s.growTimeStr || formatSec(growTimeSec),
+            normalFertReduceSec: reduceSec,
             growTimeNormalFert,
             growTimeNormalFertStr: formatSec(growTimeNormalFert),
             cycleSecNoFert,
@@ -168,7 +207,7 @@ function buildRows(rawSeeds, lands) {
         });
     }
 
-    return { rows, skipped, plantSecondsNoFert, plantSecondsNormalFert };
+    return { rows, skipped, plantSecondsNoFert, plantSecondsNormalFert, missingPhaseReduceCount };
 }
 
 function pickTop(rows, key, topN) {
@@ -181,7 +220,8 @@ function buildBestByLevel(rows) {
     const maxLevel = rows.reduce((m, r) => Math.max(m, r.requiredLevel), 1);
     const result = [];
     for (let lv = 1; lv <= maxLevel; lv++) {
-        const available = rows.filter(r => r.requiredLevel <= lv && r.unlocked !== false);
+        // 按用户指定等级做理论可种分析，不受商店 unlocked 状态影响
+        const available = rows.filter(r => r.requiredLevel <= lv);
         if (available.length === 0) continue;
         const bestNo = pickTop(available, 'farmExpPerHourNoFert', 1)[0];
         const bestFert = pickTop(available, 'farmExpPerHourNormalFert', 1)[0];
@@ -243,7 +283,8 @@ function writeSummaryTxt(outPath, opts, meta, topNo, topFert, levelInfo) {
     lines.push(`种植速度(普通肥): ${NORMAL_FERT_PLANTS_PER_2_SEC}块/${2}s (${NORMAL_FERT_PLANT_SPEED_PER_SEC}块/s)`);
     lines.push(`整场种植耗时(不施肥): ${formatSec(meta.plantSecondsNoFert)}`);
     lines.push(`整场种植耗时(普通肥): ${formatSec(meta.plantSecondsNormalFert)}`);
-    lines.push(`普通肥规则: 减少20%生长时间；不足30秒按30秒计算`);
+    lines.push(`普通肥规则: 直接减少一个生长阶段（按 Plant.json 的首个阶段时长）`);
+    lines.push(`缺少阶段配置的种子数: ${meta.missingPhaseReduceCount}`);
     lines.push('');
 
     lines.push(`Top ${topNo.length}（不施肥，按每小时经验）`);
@@ -274,46 +315,50 @@ function writeSummaryTxt(outPath, opts, meta, topNo, topFert, levelInfo) {
     fs.writeFileSync(outPath, `${lines.join('\n')}\n`, 'utf8');
 }
 
-function main() {
-    const opts = parseArgs(process.argv.slice(2));
-    const inputAbs = path.resolve(opts.input);
+function analyzeExpYield(opts = {}) {
+    const lands = Math.max(1, Math.floor(toNum(opts.lands, 18)));
+    const level = opts.level == null ? null : Math.max(1, Math.floor(toNum(opts.level, 1)));
+    const top = Math.max(1, Math.floor(toNum(opts.top, 20)));
+    const input = opts.input || DEFAULT_INPUT;
+    const inputAbs = path.resolve(input);
     const rawSeeds = readSeeds(inputAbs);
-    const { rows, skipped, plantSecondsNoFert, plantSecondsNormalFert } = buildRows(rawSeeds, opts.lands);
+    const seedPhaseReduceMap = loadSeedPhaseReduceMap();
+    const { rows, skipped, plantSecondsNoFert, plantSecondsNormalFert, missingPhaseReduceCount } = buildRows(rawSeeds, lands, seedPhaseReduceMap);
 
     if (rows.length === 0) {
         throw new Error('没有可计算的种子数据（请检查输入文件）');
     }
 
-    const topNo = pickTop(rows, 'farmExpPerHourNoFert', opts.top);
-    const topFert = pickTop(rows, 'farmExpPerHourNormalFert', opts.top);
+    const topNo = pickTop(rows, 'farmExpPerHourNoFert', top);
+    const topFert = pickTop(rows, 'farmExpPerHourNormalFert', top);
     const bestByLevel = buildBestByLevel(rows);
 
     let currentLevel = null;
-    if (opts.level != null) {
-        currentLevel = bestByLevel.find(x => x.level === opts.level) || null;
+    if (level != null) {
+        currentLevel = bestByLevel.find(x => x.level === level) || null;
     }
 
-    const payload = {
+    return {
         generatedAt: new Date().toISOString(),
         input: inputAbs,
         config: {
-            lands: opts.lands,
+            lands,
             plantSpeedPerSecNoFert: NO_FERT_PLANT_SPEED_PER_SEC,
             plantSpeedPerSecNormalFert: NORMAL_FERT_PLANT_SPEED_PER_SEC,
             plantSecondsNoFert,
             plantSecondsNormalFert,
             fertilizer: {
-                percent: FERT_PERCENT,
-                minReduceSec: FERT_MIN_REDUCE_SEC,
+                mode: 'minus_one_phase',
             },
             rule: {
-                expPerCycle: 'expHarvest + 1(removeExp)',
+                expPerCycle: 'expHarvest',
             },
         },
         stats: {
             rawCount: rawSeeds.length,
             calculatedCount: rows.length,
             skippedCount: skipped,
+            missingPhaseReduceCount,
         },
         topNoFert: topNo.map(r => ({
             seedId: r.seedId,
@@ -332,19 +377,78 @@ function main() {
         currentLevel,
         rows,
     };
+}
+
+function getPlantingRecommendation(level, lands, opts = {}) {
+    const safeLevel = Math.max(1, Math.floor(toNum(level, 1)));
+    const payload = analyzeExpYield({
+        input: opts.input || DEFAULT_INPUT,
+        lands: lands == null ? 18 : lands,
+        top: opts.top || 20,
+        level: safeLevel,
+    });
+
+    const availableRows = payload.rows.filter(r => r.requiredLevel <= safeLevel);
+    const bestNoFertRow = pickTop(availableRows, 'farmExpPerHourNoFert', 1)[0] || null;
+    const bestNormalFertRow = pickTop(availableRows, 'farmExpPerHourNormalFert', 1)[0] || null;
+
+    return {
+        level: safeLevel,
+        lands: payload.config.lands,
+        input: payload.input,
+        bestNoFert: bestNoFertRow ? {
+            seedId: bestNoFertRow.seedId,
+            name: bestNoFertRow.name,
+            requiredLevel: bestNoFertRow.requiredLevel,
+            expPerHour: Number(bestNoFertRow.farmExpPerHourNoFert.toFixed(4)),
+        } : null,
+        bestNormalFert: bestNormalFertRow ? {
+            seedId: bestNormalFertRow.seedId,
+            name: bestNormalFertRow.name,
+            requiredLevel: bestNormalFertRow.requiredLevel,
+            expPerHour: Number(bestNormalFertRow.farmExpPerHourNormalFert.toFixed(4)),
+        } : null,
+        candidatesNoFert: pickTop(availableRows, 'farmExpPerHourNoFert', opts.top || 20).map(r => ({
+            seedId: r.seedId,
+            name: r.name,
+            requiredLevel: r.requiredLevel,
+            expPerHour: Number(r.farmExpPerHourNoFert.toFixed(4)),
+        })),
+        candidatesNormalFert: pickTop(availableRows, 'farmExpPerHourNormalFert', opts.top || 20).map(r => ({
+            seedId: r.seedId,
+            name: r.name,
+            requiredLevel: r.requiredLevel,
+            expPerHour: Number(r.farmExpPerHourNormalFert.toFixed(4)),
+            gainPercent: Number(r.gainPercent.toFixed(4)),
+        })),
+    };
+}
+
+function main() {
+    const opts = parseArgs(process.argv.slice(2));
+    const payload = analyzeExpYield(opts);
+    const rows = payload.rows;
+    const topNo = pickTop(rows, 'farmExpPerHourNoFert', opts.top);
+    const topFert = pickTop(rows, 'farmExpPerHourNormalFert', opts.top);
+    const currentLevel = payload.currentLevel;
 
     writeJson(path.resolve(opts.outJson), payload);
     writeCsv(path.resolve(opts.outCsv), rows);
     writeSummaryTxt(
         path.resolve(opts.outTxt),
         opts,
-        { input: inputAbs, plantSecondsNoFert, plantSecondsNormalFert },
+        {
+            input: payload.input,
+            plantSecondsNoFert: payload.config.plantSecondsNoFert,
+            plantSecondsNormalFert: payload.config.plantSecondsNormalFert,
+            missingPhaseReduceCount: payload.stats.missingPhaseReduceCount,
+        },
         topNo,
         topFert,
         currentLevel
     );
 
-    console.log(`[收益率] 计算完成，共 ${rows.length} 条（跳过 ${skipped} 条）`);
+    console.log(`[收益率] 计算完成，共 ${rows.length} 条（跳过 ${payload.stats.skippedCount} 条）`);
     console.log(`[收益率] JSON: ${path.resolve(opts.outJson)}`);
     console.log(`[收益率] CSV : ${path.resolve(opts.outCsv)}`);
     console.log(`[收益率] TXT : ${path.resolve(opts.outTxt)}`);
@@ -354,9 +458,17 @@ function main() {
     }
 }
 
-try {
-    main();
-} catch (e) {
-    console.error(`[收益率] 失败: ${e.message}`);
-    process.exit(1);
+module.exports = {
+    analyzeExpYield,
+    getPlantingRecommendation,
+    DEFAULT_INPUT,
+};
+
+if (require.main === module) {
+    try {
+        main();
+    } catch (e) {
+        console.error(`[收益率] 失败: ${e.message}`);
+        process.exit(1);
+    }
 }

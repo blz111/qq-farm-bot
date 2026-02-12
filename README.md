@@ -134,6 +134,8 @@ node tools/calc-exp-yield.js --lands 18 --level 24
 node tools/analyze-exp-24h-lv24.js
 ```
 
+普通肥规则说明：按 Plant.json 的首个生长阶段时长减时。
+
 ## 项目结构
 
 ```
