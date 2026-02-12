@@ -17,7 +17,7 @@ const { connect, cleanup, getWs } = require('./src/network');
 const { startFarmCheckLoop, stopFarmCheckLoop } = require('./src/farm');
 const { startFriendCheckLoop, stopFriendCheckLoop } = require('./src/friend');
 const { initTaskSystem, cleanupTaskSystem } = require('./src/task');
-const { initStatusBar, cleanupStatusBar, setStatusPlatform } = require('./src/status');
+const { initStatusBar, cleanupStatusBar, setStatusPlatform, clearScreenAndRenderStatusBar } = require('./src/status');
 const { startSellLoop, stopSellLoop, debugSellFruits } = require('./src/warehouse');
 const { processInviteCodes } = require('./src/invite');
 const { verifyMode, decodeMode } = require('./src/decode');
@@ -85,6 +85,23 @@ function parseArgs(args) {
     return { code, useQr };
 }
 
+// ============ 清屏定时器 ============
+const CLEAR_SCREEN_INTERVAL_MS = 15 * 60 * 1000;
+let clearScreenTimer = null;
+
+function startClearScreenTimer() {
+    if (clearScreenTimer) return;
+    clearScreenTimer = setInterval(() => {
+        clearScreenAndRenderStatusBar();
+    }, CLEAR_SCREEN_INTERVAL_MS);
+}
+
+function stopClearScreenTimer() {
+    if (!clearScreenTimer) return;
+    clearInterval(clearScreenTimer);
+    clearScreenTimer = null;
+}
+
 // ============ 主函数 ============
 async function main() {
     const args = process.argv.slice(2);
@@ -127,6 +144,7 @@ async function main() {
     // 初始化状态栏
     initStatusBar();
     setStatusPlatform(CONFIG.platform);
+    startClearScreenTimer();
 
     const platformName = CONFIG.platform === 'wx' ? '微信' : 'QQ';
     console.log(`[启动] ${platformName} code=${code.substring(0, 8)}... 农场${CONFIG.farmCheckInterval / 1000}s 好友${CONFIG.friendCheckInterval / 1000}s`);
@@ -147,6 +165,7 @@ async function main() {
 
     // 退出处理
     process.on('SIGINT', () => {
+        stopClearScreenTimer();
         cleanupStatusBar();
         console.log('\n[退出] 正在断开...');
         stopFarmCheckLoop();

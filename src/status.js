@@ -32,6 +32,8 @@ const CYAN = `${ESC}[36m`;
 const YELLOW = `${ESC}[33m`;
 const GREEN = `${ESC}[32m`;
 const MAGENTA = `${ESC}[35m`;
+const CLEAR_SCREEN = `${ESC}[2J`;
+const CURSOR_HOME = `${ESC}[H`;
 
 // ============ 状态栏是否启用 ============
 let statusEnabled = false;
@@ -94,7 +96,7 @@ function updateScrollRegion(totalLines) {
 /**
  * 渲染状态栏
  */
-function renderStatusBar() {
+function renderStatusBar(preserveCursor = true) {
     if (!statusEnabled) return;
 
     const { platform, name, level, gold, exp, farmLines } = statusData;
@@ -135,7 +137,7 @@ function renderStatusBar() {
     const linesToClear = Math.max(totalLines, prevLines);
 
     // 保存光标位置
-    process.stdout.write(SAVE_CURSOR);
+    if (preserveCursor) process.stdout.write(SAVE_CURSOR);
     // 清除所有状态栏行
     for (let i = 1; i <= linesToClear; i++) {
         process.stdout.write(MOVE_TO(i, 1) + CLEAR_LINE);
@@ -152,7 +154,20 @@ function renderStatusBar() {
         }
     }
     // 恢复光标位置
-    process.stdout.write(RESTORE_CURSOR);
+    if (preserveCursor) process.stdout.write(RESTORE_CURSOR);
+}
+
+/**
+ * 清屏并重绘状态栏
+ */
+function clearScreenAndRenderStatusBar() {
+    if (!statusEnabled) return false;
+    const totalLines = getTotalStatusLines();
+    process.stdout.write(CLEAR_SCREEN + CURSOR_HOME);
+    updateScrollRegion(totalLines);
+    renderStatusBar(false);
+    process.stdout.write(MOVE_TO(totalLines + 1, 1));
+    return true;
 }
 
 /**
@@ -214,5 +229,6 @@ module.exports = {
     updateStatusFromLogin,
     updateStatusGold,
     updateStatusLevel,
+    clearScreenAndRenderStatusBar,
     statusData,
 };
