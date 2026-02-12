@@ -7,8 +7,9 @@ const { CONFIG, PlantPhase, PHASE_NAMES } = require('./config');
 const { types } = require('./proto');
 const { sendMsgAsync, getUserState, networkEvents } = require('./network');
 const { toLong, toNum, getServerTimeSec, toTimeSec, log, logWarn, sleep } = require('./utils');
-const { getPlantNameBySeedId, getPlantName, getPlantExp, formatGrowTime, getPlantGrowTime } = require('./gameConfig');
+const { getPlantNameBySeedId, getPlantName, getPlantExp, formatGrowTime, getPlantGrowTime, getBestSeedsForLevel } = require('./gameConfig');
 const { updateStatus } = require('./status');
+const { getBag, getBagItems } = require('./warehouse');
 
 // ============ 内部状态 ============
 let isCheckingFarm = false;
@@ -17,6 +18,14 @@ let farmCheckTimer = null;
 let farmLoopRunning = false;
 let lastFarmSnapshot = null;
 let forceFarmCheck = false;
+let lastUnlockedCount = 0;
+let bestSeedCache = {
+    level: 0,
+    lands: 0,
+    bestNoFert: null,
+    bestNormalFert: null,
+    line: '',
+};
 
 // ============ 农场 API ============
 
@@ -24,6 +33,56 @@ let forceFarmCheck = false;
 let onOperationLimitsUpdate = null;
 function setOperationLimitsCallback(callback) {
     onOperationLimitsUpdate = callback;
+}
+
+function formatExpPerHour(value) {
+    if (!Number.isFinite(value)) return '?';
+    const fixed = value.toFixed(2);
+    return fixed.endsWith('.00') ? fixed.slice(0, -3) : fixed;
+}
+
+function buildBestSeedLine(bestNoFert, bestNormalFert) {
+    if (!bestNoFert || !bestNormalFert) return '';
+    const noStr = `${bestNoFert.name} ${formatExpPerHour(bestNoFert.expPerHour)}/h`;
+    const fertStr = `${bestNormalFert.name} ${formatExpPerHour(bestNormalFert.expPerHour)}/h`;
+    return `最优: 无肥 ${noStr} | 有肥 ${fertStr}`;
+}
+
+function ensureBestSeedCache(level, unlockedCount) {
+    const lv = Number(level) || 0;
+    const lands = Number(unlockedCount) || 0;
+    if (!lv || !lands) return null;
+    if (bestSeedCache.level === lv && bestSeedCache.lands === lands
+        && bestSeedCache.bestNoFert && bestSeedCache.bestNormalFert) {
+        return bestSeedCache;
+    }
+
+    const best = getBestSeedsForLevel(lv, lands);
+    if (!best) return null;
+
+    bestSeedCache = {
+        level: lv,
+        lands,
+        bestNoFert: best.bestNoFert,
+        bestNormalFert: best.bestNormalFert,
+        line: buildBestSeedLine(best.bestNoFert, best.bestNormalFert),
+    };
+    return bestSeedCache;
+}
+
+async function getFertilizerCount() {
+    try {
+        const bagReply = await getBag();
+        const items = getBagItems(bagReply);
+        for (const item of items) {
+            if (toNum(item.id) === NORMAL_FERTILIZER_ID) {
+                return toNum(item.count);
+            }
+        }
+    } catch (e) {
+        logWarn('背包', `读取肥料数量失败: ${e.message}`);
+    }
+    return null;
 }
 
 async function getAllLands() {
@@ -166,7 +225,26 @@ async function plantSeeds(seedId, landIds) {
     return successCount;
 }
 
-async function findBestSeed() {
+function selectBestSeedFromAvailable(available, preferNoFert, level, lands) {
+    if (!available || available.length === 0) return null;
+
+    const modeLabel = preferNoFert ? '无肥最优' : '有肥最优';
+    const seedIdSet = new Set(available.map(item => item.seedId));
+    const bestByYield = (level && lands) ? getBestSeedsForLevel(level, lands, seedIdSet) : null;
+    if (bestByYield) {
+        const target = preferNoFert ? bestByYield.bestNoFert : bestByYield.bestNormalFert;
+        if (target && target.seedId) {
+            const found = available.find(item => item.seedId === target.seedId);
+            if (found) return { ...found, modeLabel };
+        }
+    }
+
+    // fallback: 默认按最低等级要求
+    available.sort((a, b) => a.requiredLevel - b.requiredLevel);
+    return { ...available[0], modeLabel: '默认' };
+}
+
+async function findBestSeed(options = {}) {
     const SEED_SHOP_ID = 2;
     const shopReply = await getShopInfo(SEED_SHOP_ID);
     if (!shopReply.goods_list || shopReply.goods_list.length === 0) {
@@ -211,11 +289,10 @@ async function findBestSeed() {
         return null;
     }
 
-    // 按等级要求排序
-    // 取最高等级种子: available.sort((a, b) => b.requiredLevel - a.requiredLevel);
-    // 暂时改为取最低等级种子 (白萝卜)
-    available.sort((a, b) => a.requiredLevel - b.requiredLevel);
-    return available[0];
+    const preferNoFert = !!options.preferNoFert;
+    const level = options.level || 0;
+    const lands = options.lands || 0;
+    return selectBestSeedFromAvailable(available, preferNoFert, level, lands);
 }
 
 async function autoPlantEmptyLands(deadLandIds, emptyLandIds) {
@@ -237,10 +314,22 @@ async function autoPlantEmptyLands(deadLandIds, emptyLandIds) {
 
     if (landsToPlant.length === 0) return;
 
-    // 2. 查询种子商店
+    // 2. 选择种子（按最优经验计算）
     let bestSeed;
     try {
-        bestSeed = await findBestSeed();
+        const fertilizerCount = await getFertilizerCount();
+        const preferNoFert = fertilizerCount !== null && fertilizerCount < 10;
+        if (preferNoFert) {
+            log('种植', `普通肥不足(${fertilizerCount})，切换为无肥最优种子`);
+        }
+
+        const landsForCalc = lastUnlockedCount || landsToPlant.length;
+        ensureBestSeedCache(state.level, landsForCalc);
+        bestSeed = await findBestSeed({
+            preferNoFert,
+            level: state.level,
+            lands: landsForCalc,
+        });
     } catch (e) {
         logWarn('商店', `查询失败: ${e.message}`);
         return;
@@ -250,7 +339,8 @@ async function autoPlantEmptyLands(deadLandIds, emptyLandIds) {
     const seedName = getPlantNameBySeedId(bestSeed.seedId);
     const growTime = getPlantGrowTime(1020000 + (bestSeed.seedId - 20000));  // 转换为植物ID
     const growTimeStr = growTime > 0 ? ` 生长${formatGrowTime(growTime)}` : '';
-    log('商店', `最佳种子: ${seedName} (${bestSeed.seedId}) 价格=${bestSeed.price}金币${growTimeStr}`);
+    const modeLabel = bestSeed.modeLabel ? `${bestSeed.modeLabel} ` : '';
+    log('商店', `${modeLabel}最佳种子: ${seedName} (${bestSeed.seedId}) 价格=${bestSeed.price}金币${growTimeStr}`);
 
     // 3. 购买
     const needCount = landsToPlant.length;
@@ -353,6 +443,7 @@ function analyzeLands(lands) {
         landSnapshots: [],
         minRemainingSec: null,
         serverTimeSec: 0,
+        unlockedCount: 0,
     };
 
     const nowSec = getServerTimeSec();
@@ -377,6 +468,7 @@ function analyzeLands(lands) {
             result.landSnapshots.push({ id, type: 'lock' });
             continue;
         }
+        result.unlockedCount++;
 
         const plant = land.plant;
         if (!plant || !plant.phases || plant.phases.length === 0) {
@@ -549,6 +641,7 @@ function buildFarmSnapshot(status) {
         minRemainingSec: status.minRemainingSec,
         serverTimeSec: status.serverTimeSec,
         landSnapshots: status.landSnapshots || [],
+        unlockedCount: status.unlockedCount || 0,
         updatedAt: Date.now(),
     };
 }
@@ -626,7 +719,9 @@ async function checkFarm() {
         if (!shouldCheckFarmNow()) {
             const refreshedLines = buildFarmLinesFromSnapshot(lastFarmSnapshot);
             if (refreshedLines) {
-                updateStatus({ farmLines: refreshedLines });
+                const statusUpdate = { farmLines: refreshedLines };
+                if (bestSeedCache.line) statusUpdate.bestSeedLine = bestSeedCache.line;
+                updateStatus(statusUpdate);
             }
             return;
         }
@@ -640,7 +735,11 @@ async function checkFarm() {
         const lands = landsReply.lands;
         const status = analyzeLands(lands);
         lastFarmSnapshot = buildFarmSnapshot(status);
-        updateStatus({ farmLines: status.farmLines });
+        lastUnlockedCount = status.unlockedCount || lastUnlockedCount;
+        const bestCache = ensureBestSeedCache(state.level, lastUnlockedCount);
+        const statusUpdate = { farmLines: status.farmLines };
+        if (bestCache && bestCache.line) statusUpdate.bestSeedLine = bestCache.line;
+        updateStatus(statusUpdate);
         isFirstFarmCheck = false;
         forceFarmCheck = false;
 
@@ -724,6 +823,7 @@ function startFarmCheckLoop() {
 
     // 监听服务器推送的土地变化事件
     networkEvents.on('landsChanged', onLandsChangedPush);
+    networkEvents.on('levelChanged', onLevelChanged);
 
     // 延迟 2 秒后启动循环
     farmCheckTimer = setTimeout(() => farmCheckLoop(), 2000);
@@ -749,10 +849,20 @@ function onLandsChangedPush(lands) {
     }, 100);
 }
 
+function onLevelChanged(level) {
+    if (!level) return;
+    if (!lastUnlockedCount) return;
+    const cache = ensureBestSeedCache(level, lastUnlockedCount);
+    if (cache && cache.line) {
+        updateStatus({ bestSeedLine: cache.line });
+    }
+}
+
 function stopFarmCheckLoop() {
     farmLoopRunning = false;
     if (farmCheckTimer) { clearTimeout(farmCheckTimer); farmCheckTimer = null; }
     networkEvents.removeListener('landsChanged', onLandsChangedPush);
+    networkEvents.removeListener('levelChanged', onLevelChanged);
 }
 
 module.exports = {

@@ -6,6 +6,31 @@
 const fs = require('fs');
 const path = require('path');
 
+// ============ 种子商店数据 ============
+let seedShopRows = [];
+try {
+    const seedShopData = require('../tools/seed-shop-merged-export.json');
+    if (Array.isArray(seedShopData)) {
+        seedShopRows = seedShopData;
+    } else if (seedShopData && Array.isArray(seedShopData.rows)) {
+        seedShopRows = seedShopData.rows;
+    } else if (seedShopData && Array.isArray(seedShopData.seeds)) {
+        seedShopRows = seedShopData.seeds;
+    }
+} catch (e) {
+    console.warn('[配置] 加载 seed-shop-merged-export.json 失败:', e.message);
+}
+
+// ============ 经验收益计算参数 ============
+const NO_FERT_PLANTS_PER_2_SEC = 18;
+const NORMAL_FERT_PLANTS_PER_2_SEC = 12;
+const NO_FERT_PLANT_SPEED_PER_SEC = NO_FERT_PLANTS_PER_2_SEC / 2; // 9 块/秒
+const NORMAL_FERT_PLANT_SPEED_PER_SEC = NORMAL_FERT_PLANTS_PER_2_SEC / 2; // 6 块/秒
+const FERT_PERCENT = 0.2;
+const FERT_MIN_REDUCE_SEC = 30;
+
+let seedYieldCache = { lands: 0, rows: [] };
+
 // ============ 等级经验表 ============
 let roleLevelConfig = null;
 let levelExpTable = null;  // 累计经验表，索引为等级
@@ -198,6 +223,137 @@ function getPlantByFruitId(fruitId) {
     return fruitToPlant.get(fruitId);
 }
 
+// ============ 种子经验收益计算 ============
+
+function toNumLocal(val, fallback = 0) {
+    const n = Number(val);
+    return Number.isFinite(n) ? n : fallback;
+}
+
+function calcEffectiveGrowTime(growSec) {
+    const reduce = Math.max(growSec * FERT_PERCENT, FERT_MIN_REDUCE_SEC);
+    return Math.max(1, growSec - reduce);
+}
+
+function normalizeSeedRow(raw) {
+    const seedId = toNumLocal(raw.seedId || raw.seed_id || raw.id, 0);
+    const goodsId = toNumLocal(raw.goodsId || raw.goods_id, 0);
+    const requiredLevel = toNumLocal(raw.requiredLevel || raw.required_level || 1, 1);
+    const price = toNumLocal(raw.price, 0);
+    const unlocked = raw.unlocked !== false;
+    let plantId = toNumLocal(raw.plantId || raw.plant_id, 0);
+
+    const plantFromSeed = seedId ? getPlantBySeedId(seedId) : null;
+    if (!plantId && plantFromSeed) {
+        plantId = plantFromSeed.id || 0;
+    }
+
+    const expHarvest = toNumLocal(raw.exp, plantFromSeed ? plantFromSeed.exp || 0 : 0);
+    let growTimeSec = toNumLocal(raw.growTimeSec || raw.growTime || raw.grow_time, 0);
+    if (growTimeSec <= 0 && plantId) {
+        growTimeSec = getPlantGrowTime(plantId);
+    }
+
+    const name = raw.name || (plantFromSeed ? plantFromSeed.name : `种子${seedId}`);
+
+    return {
+        seedId,
+        goodsId,
+        plantId,
+        name,
+        requiredLevel,
+        price,
+        unlocked,
+        expHarvest,
+        growTimeSec,
+    };
+}
+
+function buildSeedYieldRows(lands) {
+    const landCount = Math.max(1, Math.floor(toNumLocal(lands, 1)));
+    if (seedYieldCache.lands === landCount && seedYieldCache.rows.length > 0) {
+        return seedYieldCache.rows;
+    }
+
+    const plantSecondsNoFert = landCount / NO_FERT_PLANT_SPEED_PER_SEC;
+    const plantSecondsNormalFert = landCount / NORMAL_FERT_PLANT_SPEED_PER_SEC;
+
+    const rows = [];
+    for (const raw of seedShopRows) {
+        const seed = normalizeSeedRow(raw);
+        if (!seed.seedId || seed.growTimeSec <= 0) continue;
+
+        const expPerCycle = seed.expHarvest; // 铲地经验不计入
+        const growTimeNormalFert = calcEffectiveGrowTime(seed.growTimeSec);
+
+        const cycleSecNoFert = seed.growTimeSec + plantSecondsNoFert;
+        const cycleSecNormalFert = growTimeNormalFert + plantSecondsNormalFert;
+
+        const farmExpPerHourNoFert = cycleSecNoFert > 0
+            ? (landCount * expPerCycle / cycleSecNoFert) * 3600
+            : 0;
+        const farmExpPerHourNormalFert = cycleSecNormalFert > 0
+            ? (landCount * expPerCycle / cycleSecNormalFert) * 3600
+            : 0;
+
+        rows.push({
+            ...seed,
+            farmExpPerHourNoFert,
+            farmExpPerHourNormalFert,
+        });
+    }
+
+    seedYieldCache = { lands: landCount, rows };
+    return rows;
+}
+
+function pickBestSeed(rows, key) {
+    if (!rows || rows.length === 0) return null;
+    let best = rows[0];
+    for (let i = 1; i < rows.length; i++) {
+        if (rows[i][key] > best[key]) best = rows[i];
+    }
+    return best;
+}
+
+/**
+ * 计算指定等级和地块数的最优种子
+ * @param {number} level - 当前等级
+ * @param {number} lands - 已解锁地块数
+ * @param {Set<number>} [seedIdSet] - 可选的种子ID过滤集合
+ */
+function getBestSeedsForLevel(level, lands, seedIdSet) {
+    const lv = Math.max(1, Math.floor(toNumLocal(level, 1)));
+    const landCount = Math.max(1, Math.floor(toNumLocal(lands, 1)));
+    const rows = buildSeedYieldRows(landCount);
+    const available = rows.filter(r => r.requiredLevel <= lv && r.unlocked !== false);
+    const filtered = seedIdSet ? available.filter(r => seedIdSet.has(r.seedId)) : available;
+
+    if (filtered.length === 0) return null;
+
+    const bestNoFert = pickBestSeed(filtered, 'farmExpPerHourNoFert');
+    const bestNormalFert = pickBestSeed(filtered, 'farmExpPerHourNormalFert');
+
+    if (!bestNoFert || !bestNormalFert) return null;
+
+    return {
+        bestNoFert: {
+            seedId: bestNoFert.seedId,
+            goodsId: bestNoFert.goodsId,
+            name: bestNoFert.name,
+            price: bestNoFert.price,
+            expPerHour: bestNoFert.farmExpPerHourNoFert,
+        },
+        bestNormalFert: {
+            seedId: bestNormalFert.seedId,
+            goodsId: bestNormalFert.goodsId,
+            name: bestNormalFert.name,
+            price: bestNormalFert.price,
+            expPerHour: bestNormalFert.farmExpPerHourNormalFert,
+        },
+    };
+}
+
 // 启动时加载配置
 loadConfigs();
 
@@ -218,4 +374,6 @@ module.exports = {
     // 果实配置
     getFruitName,
     getPlantByFruitId,
+    // 最优种子计算
+    getBestSeedsForLevel,
 };

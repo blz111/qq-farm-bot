@@ -11,6 +11,7 @@ const statusData = {
     level: 0,
     gold: 0,
     exp: 0,
+    bestSeedLine: '',
     farmLines: [],
 };
 
@@ -82,7 +83,9 @@ function cleanupStatusBar() {
 }
 
 function getTotalStatusLines() {
-    const extraLines = statusData.farmLines ? statusData.farmLines.length : 0;
+    const farmLines = statusData.farmLines ? statusData.farmLines.length : 0;
+    const bestSeedLines = statusData.bestSeedLine ? 1 : 0;
+    const extraLines = farmLines + bestSeedLines;
     return BASE_STATUS_LINES + extraLines;
 }
 
@@ -99,7 +102,7 @@ function updateScrollRegion(totalLines) {
 function renderStatusBar(preserveCursor = true) {
     if (!statusEnabled) return;
 
-    const { platform, name, level, gold, exp, farmLines } = statusData;
+    const { platform, name, level, gold, exp, farmLines, bestSeedLine } = statusData;
 
     // 构建状态行
     const platformStr = platform === 'wx' ? `${MAGENTA}微信${RESET}` : `${CYAN}QQ${RESET}`;
@@ -146,11 +149,15 @@ function renderStatusBar(preserveCursor = true) {
     process.stdout.write(MOVE_TO(1, 1) + line1);
     // 第二行
     process.stdout.write(MOVE_TO(2, 1) + line2);
-    // 农场状态行
+    let lineOffset = 3;
+    if (bestSeedLine) {
+        process.stdout.write(MOVE_TO(lineOffset, 1) + bestSeedLine);
+        lineOffset++;
+    }
     if (farmLines && farmLines.length > 0) {
         for (let i = 0; i < farmLines.length; i++) {
             const line = farmLines[i];
-            process.stdout.write(MOVE_TO(3 + i, 1) + line);
+            process.stdout.write(MOVE_TO(lineOffset + i, 1) + line);
         }
     }
     // 恢复光标位置

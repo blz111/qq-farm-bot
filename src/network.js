@@ -223,6 +223,7 @@ function handleNotify(msg) {
                     // 升级提示
                     if (userState.level !== oldLevel) {
                         log('系统', `升级! Lv${oldLevel} → Lv${userState.level}`);
+                        networkEvents.emit('levelChanged', userState.level);
                     }
                 }
             } catch (e) { }
